@@ -1,6 +1,7 @@
 package escuelaing.edu.co.AI_powered_fleet_allocation.service;
 
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.AvailableTruckDto;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FleetDriverStateDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FreightLoadDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.EventEnvelope;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationCandidateResponse;
@@ -50,7 +51,9 @@ class FleetAllocationReallocationTest {
         when(restClient.get().uri(anyString()).retrieve().body(FreightLoadDto.class))
                 .thenReturn(FreightLoadDto.builder().id(42L).weightTons(20.0).build());
         when(restClient.get().uri(anyString()).retrieve().body(any(ParameterizedTypeReference.class)))
-                .thenReturn(List.of(truck("driver-1"), truck("driver-2"), truck("driver-3")));
+                .thenReturn(List.of(state("driver-1", "ACTIVO", false), state("driver-2", "ACTIVO", false),
+                        state("driver-3", "ACTIVO", false), state("driver-4", "INACTIVO", false),
+                        state("driver-5", "ACTIVO", true)));
         when(optimizer.evaluateTruck(any(AvailableTruckDto.class), any(FreightLoadDto.class)))
                 .thenAnswer(invocation -> {
                     AvailableTruckDto truck = invocation.getArgument(0);
@@ -92,7 +95,24 @@ class FleetAllocationReallocationTest {
         return (EventEnvelope<?>) captor.getValue();
     }
 
-    private AvailableTruckDto truck(String driverId) {
-        return AvailableTruckDto.builder().driverId(driverId).plate("PL-" + driverId).build();
+    @Test
+    void onlyActiveDriversWithoutRestAlertAreEvaluated() {
+        AllocationResultResponse result = service.processAutomaticReallocationForLoad(
+                42L, Set.of("driver-1", "driver-2", "driver-3"), "assignment.rejected");
+
+        // driver-4 está INACTIVO y driver-5 tiene alerta de descanso: ninguno es candidato.
+        assertThat(result.getStatus()).isEqualTo(AllocationStatus.NO_DRIVERS_AVAILABLE);
+        assertThat(result.getEvaluatedCandidates()).isEmpty();
+    }
+
+    private FleetDriverStateDto state(String driverId, String status, boolean restRequired) {
+        return FleetDriverStateDto.builder()
+                .driverId(driverId)
+                .vehiclePlate("PL-" + driverId)
+                .vehicleType("TRACTOMULA_3S3")
+                .netCargoWeightTons(34.0)
+                .status(status)
+                .restRequiredAlert(restRequired)
+                .build();
     }
 }

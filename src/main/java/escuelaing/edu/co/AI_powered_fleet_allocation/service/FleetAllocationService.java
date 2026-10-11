@@ -1,6 +1,7 @@
 package escuelaing.edu.co.truckdar.fleet_allocation.service;
 
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.AvailableTruckDto;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FleetDriverStateDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FreightLoadDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.FleetAllocationCompletedEvent;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.AgentScoreReadyEvent;
@@ -206,11 +207,14 @@ public class FleetAllocationService implements IFleetAllocationService {
 
     private Optional<List<AvailableTruckDto>> fetchAvailableTrucksFromService() {
         try {
-            List<AvailableTruckDto> trucks = restClient.get()
-                    .uri(fleetsDriversServiceUrl + "/api/v1/vehicles/available")
+            List<FleetDriverStateDto> states = restClient.get()
+                    .uri(fleetsDriversServiceUrl + "/api/v1/fleets-drivers/active")
                     .retrieve()
-                    .body(new ParameterizedTypeReference<List<AvailableTruckDto>>() {});
-            return Optional.ofNullable(trucks);
+                    .body(new ParameterizedTypeReference<List<FleetDriverStateDto>>() {});
+            return Optional.ofNullable(states).map(list -> list.stream()
+                    .filter(FleetDriverStateDto::isAvailableForAllocation)
+                    .map(FleetDriverStateDto::toAvailableTruck)
+                    .collect(Collectors.toList()));
         } catch (Exception e) {
             log.error("No se pudo obtener flota desde {}; no se usarán datos sintéticos",
                     fleetsDriversServiceUrl, e);
