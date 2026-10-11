@@ -8,5 +8,6 @@ import java.util.List;
 public interface IFleetAllocationService {
     AllocationResultResponse processManualOptimization(ManualAllocationRequest request);
     AllocationResultResponse processAutomaticAllocationForLoad(Long loadId);
+    AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, String excludedDriverId, String trigger);
     List<AllocationResultResponse> getDecisionsByLoad(Long loadId);
 }

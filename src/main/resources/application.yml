@@ -27,6 +27,12 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
+truckdar:
+  kafka:
+    topic:
+      load-events: truckdar.events.load-allocation
+      vehicle-status: truckdar.events.vehicle-status
+
 services:
   load-allocation:
     url: http://localhost:8083

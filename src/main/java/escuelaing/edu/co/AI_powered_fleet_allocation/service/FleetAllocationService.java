@@ -3,6 +3,8 @@ package escuelaing.edu.co.truckdar.fleet_allocation.service;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.AvailableTruckDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FreightLoadDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.FleetAllocationCompletedEvent;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.AgentScoreReadyEvent;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.EventEnvelope;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.request.ManualAllocationRequest;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationCandidateResponse;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationResultResponse;
@@ -20,9 +22,12 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
 
 import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -83,12 +88,21 @@ public class FleetAllocationService implements IFleetAllocationService {
     @Override
     @Transactional
     public AllocationResultResponse processAutomaticAllocationForLoad(Long loadId) {
-        FreightLoadDto load = fetchLoadFromService(loadId);
-        List<AvailableTruckDto> availableTrucks = fetchAvailableTrucksFromService();
+        Optional<FreightLoadDto> load = fetchLoadFromService(loadId);
+        if (load.isEmpty()) {
+            return pendingRecommendation(loadId,
+                    "La carga no está disponible; la recomendación queda pendiente sin datos sintéticos");
+        }
+
+        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService();
+        if (availableTrucks.isEmpty()) {
+            return pendingRecommendation(loadId,
+                    "La flota no está disponible; la recomendación queda pendiente sin datos sintéticos");
+        }
 
         ManualAllocationRequest request = ManualAllocationRequest.builder()
-                .load(load)
-                .candidateTrucks(availableTrucks)
+                .load(load.get())
+                .candidateTrucks(availableTrucks.get())
                 .build();
 
         AllocationResultResponse result = processManualOptimization(request);
@@ -98,6 +112,60 @@ public class FleetAllocationService implements IFleetAllocationService {
         }
 
         return result;
+    }
+
+    @Override
+    @Transactional
+    public AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, String excludedDriverId,
+                                                                        String trigger) {
+        Optional<FreightLoadDto> load = fetchLoadFromService(loadId);
+        if (load.isEmpty()) {
+            return pendingRecommendation(loadId,
+                    "La carga no está disponible; la reasignación queda pendiente sin datos sintéticos");
+        }
+
+        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService();
+        if (availableTrucks.isEmpty()) {
+            return pendingRecommendation(loadId,
+                    "La flota no está disponible; la reasignación queda pendiente sin datos sintéticos");
+        }
+
+        List<AllocationCandidateResponse> evaluatedList = availableTrucks.get().stream()
+                .filter(truck -> excludedDriverId == null || !excludedDriverId.equals(truck.getDriverId()))
+                .map(truck -> optimizer.evaluateTruck(truck, load.get()))
+                .sorted(Comparator.comparing(AllocationCandidateResponse::getScore).reversed())
+                .collect(Collectors.toList());
+        AllocationCandidateResponse nextCandidate = evaluatedList.stream()
+                .filter(AllocationCandidateResponse::getEligible)
+                .findFirst()
+                .orElse(null);
+        AllocationDecision saved = repository.save(buildDecisionEntity(loadId, nextCandidate, evaluatedList.size()));
+
+        if (nextCandidate == null) {
+            return AllocationResultResponse.builder()
+                    .decisionId(saved.getId())
+                    .loadId(loadId)
+                    .status(AllocationStatus.NO_DRIVERS_AVAILABLE)
+                    .reasonDetails("No hay candidatos elegibles después de excluir al conductor " + excludedDriverId)
+                    .evaluatedCandidates(evaluatedList)
+                    .executedAt(saved.getExecutedAt())
+                    .build();
+        }
+
+        publishScoreReadyEvent(saved, nextCandidate, trigger);
+        return AllocationResultResponse.builder()
+                .decisionId(saved.getId())
+                .loadId(loadId)
+                .status(saved.getStatus())
+                .selectedDriverId(nextCandidate.getDriverId())
+                .selectedDriverName(nextCandidate.getDriverName())
+                .selectedVehiclePlate(nextCandidate.getVehiclePlate())
+                .matchingScore(nextCandidate.getScore())
+                .deadheadDistanceKm(nextCandidate.getDeadheadDistanceKm())
+                .reasonDetails(nextCandidate.getReason())
+                .evaluatedCandidates(evaluatedList)
+                .executedAt(saved.getExecutedAt())
+                .build();
     }
 
     @Override
@@ -119,46 +187,41 @@ public class FleetAllocationService implements IFleetAllocationService {
                 .collect(Collectors.toList());
     }
 
-    private FreightLoadDto fetchLoadFromService(Long loadId) {
+    private Optional<FreightLoadDto> fetchLoadFromService(Long loadId) {
         try {
-            return restClient.get()
+            FreightLoadDto load = restClient.get()
                     .uri(loadAllocationServiceUrl + "/api/v1/loads/" + loadId)
                     .retrieve()
                     .body(FreightLoadDto.class);
+            return Optional.ofNullable(load);
         } catch (Exception e) {
-            log.warn("No se pudo obtener carga desde {}: usando fallback local", loadAllocationServiceUrl);
-            return FreightLoadDto.builder()
-                    .id(loadId)
-                    .weightTons(30.0)
-                    .requiredTruckType("TRACTOMULA_3S3")
-                    .originLatitude(4.6097)
-                    .originLongitude(-74.0817)
-                    .build();
+            log.error("No se pudo obtener carga desde {}; no se usarán datos sintéticos",
+                    loadAllocationServiceUrl, e);
+            return Optional.empty();
         }
     }
 
-    private List<AvailableTruckDto> fetchAvailableTrucksFromService() {
+    private Optional<List<AvailableTruckDto>> fetchAvailableTrucksFromService() {
         try {
-            return restClient.get()
+            List<AvailableTruckDto> trucks = restClient.get()
                     .uri(fleetsDriversServiceUrl + "/api/v1/vehicles/available")
                     .retrieve()
                     .body(new ParameterizedTypeReference<List<AvailableTruckDto>>() {});
+            return Optional.ofNullable(trucks);
         } catch (Exception e) {
-            log.warn("No se pudo obtener flota desde {}: simulando transportadores disponibles", fleetsDriversServiceUrl);
-            return List.of(
-                    AvailableTruckDto.builder()
-                            .plate("WOB123")
-                            .driverId("79483011")
-                            .driverName("Carlos Mendoza")
-                            .truckType("TRACTOMULA_3S3")
-                            .capacityTons(35.0)
-                            .currentLatitude(4.6500)
-                            .currentLongitude(-74.1000)
-                            .rating(4.9)
-                            .isAvailable(true)
-                            .build()
-            );
+            log.error("No se pudo obtener flota desde {}; no se usarán datos sintéticos",
+                    fleetsDriversServiceUrl, e);
+            return Optional.empty();
         }
+    }
+
+    private AllocationResultResponse pendingRecommendation(Long loadId, String reason) {
+        return AllocationResultResponse.builder()
+                .loadId(loadId)
+                .status(AllocationStatus.RECOMMENDATION_PENDING)
+                .reasonDetails(reason)
+                .executedAt(LocalDateTime.now())
+                .build();
     }
 
     private void confirmAssignmentInLoadService(Long loadId, String driverId, String driverName, String plate) {
@@ -221,5 +284,34 @@ public class FleetAllocationService implements IFleetAllocationService {
         } catch (Throwable t) {
             log.warn("No se pudo publicar evento de asignación en Kafka: {}", t.getMessage());
         }
+    }
+
+    private void publishScoreReadyEvent(AllocationDecision decision,
+                                        AllocationCandidateResponse candidate,
+                                        String trigger) {
+            AgentScoreReadyEvent payload = AgentScoreReadyEvent.builder()
+                    .loadId(decision.getLoadId())
+                    .decisionId(decision.getId())
+                    .driverId(candidate.getDriverId())
+                    .driverName(candidate.getDriverName())
+                    .vehiclePlate(candidate.getVehiclePlate())
+                    .score(candidate.getScore())
+                    .deadheadDistanceKm(candidate.getDeadheadDistanceKm())
+                    .explanation(candidate.getReason())
+                    .trigger(trigger)
+                    .build();
+            EventEnvelope<AgentScoreReadyEvent> event = EventEnvelope.<AgentScoreReadyEvent>builder()
+                    .eventId(UUID.randomUUID())
+                    .eventType("agent.score.ready")
+                    .occurredAt(Instant.now())
+                    .correlationId(UUID.nameUUIDFromBytes(
+                            String.valueOf(decision.getLoadId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                    .version(1)
+                    .producer("ai-powered-fleet-allocation")
+                    .payload(payload)
+                    .build();
+            kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(), event);
+            log.info("Puntaje de reasignación listo para carga #{} y conductor {}",
+                    decision.getLoadId(), candidate.getDriverId());
     }
 }
