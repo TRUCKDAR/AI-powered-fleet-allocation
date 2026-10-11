@@ -1,4 +1,4 @@
-package escuelaing.edu.co.AI_powered_fleet_allocation.config;
+package escuelaing.edu.co.truckdar.fleet_allocation.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.admin.NewTopic;

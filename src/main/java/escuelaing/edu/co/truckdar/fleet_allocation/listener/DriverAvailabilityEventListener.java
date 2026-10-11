@@ -1,4 +1,4 @@
-package escuelaing.edu.co.AI_powered_fleet_allocation.listener;
+package escuelaing.edu.co.truckdar.fleet_allocation.listener;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.EventEnvelope;

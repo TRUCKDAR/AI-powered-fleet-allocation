@@ -1,9 +1,7 @@
-package escuelaing.edu.co.AI_powered_fleet_allocation.dto.event;
+package escuelaing.edu.co.truckdar.fleet_allocation.dto.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.EventEnvelope;
-import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.FreightLoadEventPayload;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

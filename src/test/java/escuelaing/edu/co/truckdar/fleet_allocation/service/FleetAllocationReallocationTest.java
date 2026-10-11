@@ -1,4 +1,4 @@
-package escuelaing.edu.co.AI_powered_fleet_allocation.service;
+package escuelaing.edu.co.truckdar.fleet_allocation.service;
 
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.AvailableTruckDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FleetDriverStateDto;
@@ -9,7 +9,6 @@ import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationResult
 import escuelaing.edu.co.truckdar.fleet_allocation.model.AllocationDecision;
 import escuelaing.edu.co.truckdar.fleet_allocation.model.AllocationStatus;
 import escuelaing.edu.co.truckdar.fleet_allocation.repository.AllocationDecisionRepository;
-import escuelaing.edu.co.truckdar.fleet_allocation.service.FleetAllocationService;
 import escuelaing.edu.co.truckdar.fleet_allocation.service.algorithm.FleetScoringOptimizer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +20,7 @@ import org.springframework.web.client.RestClient;
 
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -32,6 +32,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class FleetAllocationReallocationTest {
+
+    private static final UUID CORRELATION_ID = UUID.fromString("7f0c2a52-9d1e-4c11-8a4b-2f6c3d9e1a01");
 
     private AllocationDecisionRepository repository;
     private FleetScoringOptimizer optimizer;
@@ -74,19 +76,23 @@ class FleetAllocationReallocationTest {
     @Test
     void excludesEveryDiscardedDriverAndPublishesScoreReady() {
         AllocationResultResponse result = service.processAutomaticReallocationForLoad(
-                42L, Set.of("driver-1", "driver-2"), "assignment.rejected");
+                42L, Set.of("driver-1", "driver-2"), "assignment.rejected", CORRELATION_ID);
 
         assertThat(result.getSelectedDriverId()).isEqualTo("driver-3");
-        assertThat(publishedEnvelope().getEventType()).isEqualTo("agent.score.ready");
+        EventEnvelope<?> envelope = publishedEnvelope();
+        assertThat(envelope.getEventType()).isEqualTo("agent.score.ready");
+        assertThat(envelope.getCorrelationId()).isEqualTo(CORRELATION_ID);
     }
 
     @Test
     void publishesNoCandidatesWhenAllDriversWereDiscarded() {
         AllocationResultResponse result = service.processAutomaticReallocationForLoad(
-                42L, Set.of("driver-1", "driver-2", "driver-3"), "assignment.timeout");
+                42L, Set.of("driver-1", "driver-2", "driver-3"), "assignment.timeout", CORRELATION_ID);
 
         assertThat(result.getStatus()).isEqualTo(AllocationStatus.NO_DRIVERS_AVAILABLE);
-        assertThat(publishedEnvelope().getEventType()).isEqualTo("agent.no.candidates");
+        EventEnvelope<?> envelope = publishedEnvelope();
+        assertThat(envelope.getEventType()).isEqualTo("agent.no.candidates");
+        assertThat(envelope.getCorrelationId()).isEqualTo(CORRELATION_ID);
     }
 
     private EventEnvelope<?> publishedEnvelope() {
@@ -98,7 +104,7 @@ class FleetAllocationReallocationTest {
     @Test
     void onlyActiveDriversWithoutRestAlertAreEvaluated() {
         AllocationResultResponse result = service.processAutomaticReallocationForLoad(
-                42L, Set.of("driver-1", "driver-2", "driver-3"), "assignment.rejected");
+                42L, Set.of("driver-1", "driver-2", "driver-3"), "assignment.rejected", CORRELATION_ID);
 
         // driver-4 está INACTIVO y driver-5 tiene alerta de descanso: ninguno es candidato.
         assertThat(result.getStatus()).isEqualTo(AllocationStatus.NO_DRIVERS_AVAILABLE);

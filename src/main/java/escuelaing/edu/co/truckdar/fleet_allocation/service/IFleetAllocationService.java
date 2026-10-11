@@ -1,0 +1,21 @@
+package escuelaing.edu.co.truckdar.fleet_allocation.service;
+
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.request.ManualAllocationRequest;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationResultResponse;
+
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+
+public interface IFleetAllocationService {
+    AllocationResultResponse processManualOptimization(ManualAllocationRequest request);
+    AllocationResultResponse processAutomaticAllocationForLoad(Long loadId, UUID correlationId);
+    AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, Set<String> excludedDriverIds, String trigger,
+                                                                 UUID correlationId);
+
+    /** Disparo manual por REST: sin evento de origen, la correlación se deriva del loadId. */
+    default AllocationResultResponse processAutomaticAllocationForLoad(Long loadId) {
+        return processAutomaticAllocationForLoad(loadId, null);
+    }
+    List<AllocationResultResponse> getDecisionsByLoad(Long loadId);
+}

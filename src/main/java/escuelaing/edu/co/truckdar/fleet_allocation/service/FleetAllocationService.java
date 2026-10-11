@@ -89,7 +89,7 @@ public class FleetAllocationService implements IFleetAllocationService {
 
     @Override
     @Transactional
-    public AllocationResultResponse processAutomaticAllocationForLoad(Long loadId) {
+    public AllocationResultResponse processAutomaticAllocationForLoad(Long loadId, UUID correlationId) {
         Optional<FreightLoadDto> load = fetchLoadFromService(loadId);
         if (load.isEmpty()) {
             return pendingRecommendation(loadId,
@@ -110,7 +110,8 @@ public class FleetAllocationService implements IFleetAllocationService {
         AllocationResultResponse result = processManualOptimization(request);
 
         if (result.getStatus() == AllocationStatus.SUCCESSFUL) {
-            confirmAssignmentInLoadService(loadId, result.getSelectedDriverId(), result.getSelectedDriverName(), result.getSelectedVehiclePlate());
+            confirmAssignmentInLoadService(loadId, result.getSelectedDriverId(), result.getSelectedDriverName(),
+                    result.getSelectedVehiclePlate(), correlationId);
         }
 
         return result;
@@ -119,7 +120,7 @@ public class FleetAllocationService implements IFleetAllocationService {
     @Override
     @Transactional
     public AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, Set<String> excludedDriverIds,
-                                                                        String trigger) {
+                                                                        String trigger, UUID correlationId) {
         Set<String> excluded = excludedDriverIds == null ? Set.of() : excludedDriverIds;
         Optional<FreightLoadDto> load = fetchLoadFromService(loadId);
         if (load.isEmpty()) {
@@ -145,7 +146,7 @@ public class FleetAllocationService implements IFleetAllocationService {
         AllocationDecision saved = repository.save(buildDecisionEntity(loadId, nextCandidate, evaluatedList.size()));
 
         if (nextCandidate == null) {
-            publishNoCandidatesEvent(saved, excluded, trigger);
+            publishNoCandidatesEvent(saved, excluded, trigger, correlationId);
             return AllocationResultResponse.builder()
                     .decisionId(saved.getId())
                     .loadId(loadId)
@@ -156,7 +157,7 @@ public class FleetAllocationService implements IFleetAllocationService {
                     .build();
         }
 
-        publishScoreReadyEvent(saved, nextCandidate, trigger);
+        publishScoreReadyEvent(saved, nextCandidate, trigger, correlationId);
         return AllocationResultResponse.builder()
                 .decisionId(saved.getId())
                 .loadId(loadId)
@@ -231,10 +232,16 @@ public class FleetAllocationService implements IFleetAllocationService {
                 .build();
     }
 
-    private void confirmAssignmentInLoadService(Long loadId, String driverId, String driverName, String plate) {
+    private void confirmAssignmentInLoadService(Long loadId, String driverId, String driverName, String plate,
+                                                UUID correlationId) {
         try {
             restClient.patch()
                     .uri(loadAllocationServiceUrl + "/api/v1/loads/" + loadId + "/assign")
+                    .headers(headers -> {
+                        if (correlationId != null) {
+                            headers.set("X-Correlation-Id", correlationId.toString());
+                        }
+                    })
                     .body(Map.of(
                             "driverId", driverId,
                             "driverName", driverName,
@@ -295,7 +302,8 @@ public class FleetAllocationService implements IFleetAllocationService {
 
     private void publishScoreReadyEvent(AllocationDecision decision,
                                         AllocationCandidateResponse candidate,
-                                        String trigger) {
+                                        String trigger,
+                                        UUID correlationId) {
             AgentScoreReadyEvent payload = AgentScoreReadyEvent.builder()
                     .loadId(decision.getLoadId())
                     .decisionId(decision.getId())
@@ -308,12 +316,13 @@ public class FleetAllocationService implements IFleetAllocationService {
                     .trigger(trigger)
                     .build();
             kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(),
-                    envelope("agent.score.ready", decision.getLoadId(), payload));
+                    envelope("agent.score.ready", decision.getLoadId(), payload, correlationId));
             log.info("Puntaje de reasignación listo para carga #{} y conductor {}",
                     decision.getLoadId(), candidate.getDriverId());
     }
 
-    private void publishNoCandidatesEvent(AllocationDecision decision, Set<String> excludedDriverIds, String trigger) {
+    private void publishNoCandidatesEvent(AllocationDecision decision, Set<String> excludedDriverIds, String trigger,
+                                          UUID correlationId) {
         Map<String, Object> payload = Map.of(
                 "loadId", decision.getLoadId(),
                 "decisionId", decision.getId(),
@@ -321,16 +330,17 @@ public class FleetAllocationService implements IFleetAllocationService {
                 "trigger", trigger == null ? "" : trigger
         );
         kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(),
-                envelope("agent.no.candidates", decision.getLoadId(), payload));
+                envelope("agent.no.candidates", decision.getLoadId(), payload, correlationId));
         log.info("Sin candidatos para la carga #{} tras excluir {}", decision.getLoadId(), excludedDriverIds);
     }
 
-    private <T> EventEnvelope<T> envelope(String eventType, Long loadId, T payload) {
+    /** Conserva el correlationId del evento recibido; solo si falta (llamada REST manual) se deriva del loadId. */
+    private <T> EventEnvelope<T> envelope(String eventType, Long loadId, T payload, UUID correlationId) {
         return EventEnvelope.<T>builder()
                 .eventId(UUID.randomUUID())
                 .eventType(eventType)
                 .occurredAt(Instant.now())
-                .correlationId(UUID.nameUUIDFromBytes(
+                .correlationId(correlationId != null ? correlationId : UUID.nameUUIDFromBytes(
                         String.valueOf(loadId).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                 .version(1)
                 .producer("ai-powered-fleet-allocation")

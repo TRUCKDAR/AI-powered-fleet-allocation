@@ -33,7 +33,8 @@ public class FreightLoadEventListener {
             if ("load.published".equals(event.getEventType()) && event.getPayload() != null) {
                 log.info("Evento Kafka de nueva carga recibido para matching automático: Carga #{}",
                         event.getPayload().getLoadId());
-                allocationService.processAutomaticAllocationForLoad(event.getPayload().getLoadId());
+                allocationService.processAutomaticAllocationForLoad(event.getPayload().getLoadId(),
+                        event.getCorrelationId());
             } else if ("load.assigned".equals(event.getEventType())) {
                 log.debug("Evento load.assigned ignorado para evitar reprocesar la carga #{}",
                         event.getPayload() != null ? event.getPayload().getLoadId() : null);
@@ -52,7 +53,8 @@ public class FreightLoadEventListener {
                 log.info("Reasignación solicitada para carga #{} por {}; se excluyen conductores {}",
                         event.getPayload().getLoadId(), event.getEventType(), excludedDriverIds);
                 allocationService.processAutomaticReallocationForLoad(
-                        event.getPayload().getLoadId(), excludedDriverIds, event.getEventType());
+                        event.getPayload().getLoadId(), excludedDriverIds, event.getEventType(),
+                        event.getCorrelationId());
             }
         } catch (Exception e) {
             log.error("No se pudo procesar evento de carga con sobre común", e);
