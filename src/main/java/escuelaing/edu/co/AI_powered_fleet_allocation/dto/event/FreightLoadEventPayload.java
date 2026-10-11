@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Data
 @Builder
@@ -26,4 +27,6 @@ public class FreightLoadEventPayload {
     private String assignedDriverId;
     private String assignedDriverName;
     private String assignedVehiclePlate;
+    private Integer assignmentAttempts;
+    private List<String> excludedDriverIds;
 }

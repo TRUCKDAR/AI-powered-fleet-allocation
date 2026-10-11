@@ -9,6 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -38,11 +41,18 @@ public class FreightLoadEventListener {
                     || "assignment.timeout".equals(event.getEventType()))
                     && event.getPayload() != null
                     && event.getPayload().getLoadId() != null) {
-                String excludedDriverId = event.getPayload().getAssignedDriverId();
-                log.info("Reasignación solicitada para carga #{} por {}; se excluye conductor {}",
-                        event.getPayload().getLoadId(), event.getEventType(), excludedDriverId);
+                // Se excluyen todos los conductores descartados por la carga, no solo el último, para evitar ciclos A→B→A.
+                Set<String> excludedDriverIds = new LinkedHashSet<>();
+                if (event.getPayload().getExcludedDriverIds() != null) {
+                    excludedDriverIds.addAll(event.getPayload().getExcludedDriverIds());
+                }
+                if (event.getPayload().getAssignedDriverId() != null) {
+                    excludedDriverIds.add(event.getPayload().getAssignedDriverId());
+                }
+                log.info("Reasignación solicitada para carga #{} por {}; se excluyen conductores {}",
+                        event.getPayload().getLoadId(), event.getEventType(), excludedDriverIds);
                 allocationService.processAutomaticReallocationForLoad(
-                        event.getPayload().getLoadId(), excludedDriverId, event.getEventType());
+                        event.getPayload().getLoadId(), excludedDriverIds, event.getEventType());
             }
         } catch (Exception e) {
             log.error("No se pudo procesar evento de carga con sobre común", e);

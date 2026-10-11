@@ -27,6 +27,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -116,8 +117,9 @@ public class FleetAllocationService implements IFleetAllocationService {
 
     @Override
     @Transactional
-    public AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, String excludedDriverId,
+    public AllocationResultResponse processAutomaticReallocationForLoad(Long loadId, Set<String> excludedDriverIds,
                                                                         String trigger) {
+        Set<String> excluded = excludedDriverIds == null ? Set.of() : excludedDriverIds;
         Optional<FreightLoadDto> load = fetchLoadFromService(loadId);
         if (load.isEmpty()) {
             return pendingRecommendation(loadId,
@@ -131,7 +133,7 @@ public class FleetAllocationService implements IFleetAllocationService {
         }
 
         List<AllocationCandidateResponse> evaluatedList = availableTrucks.get().stream()
-                .filter(truck -> excludedDriverId == null || !excludedDriverId.equals(truck.getDriverId()))
+                .filter(truck -> !excluded.contains(truck.getDriverId()))
                 .map(truck -> optimizer.evaluateTruck(truck, load.get()))
                 .sorted(Comparator.comparing(AllocationCandidateResponse::getScore).reversed())
                 .collect(Collectors.toList());
@@ -142,11 +144,12 @@ public class FleetAllocationService implements IFleetAllocationService {
         AllocationDecision saved = repository.save(buildDecisionEntity(loadId, nextCandidate, evaluatedList.size()));
 
         if (nextCandidate == null) {
+            publishNoCandidatesEvent(saved, excluded, trigger);
             return AllocationResultResponse.builder()
                     .decisionId(saved.getId())
                     .loadId(loadId)
                     .status(AllocationStatus.NO_DRIVERS_AVAILABLE)
-                    .reasonDetails("No hay candidatos elegibles después de excluir al conductor " + excludedDriverId)
+                    .reasonDetails("No hay candidatos elegibles después de excluir a los conductores " + excluded)
                     .evaluatedCandidates(evaluatedList)
                     .executedAt(saved.getExecutedAt())
                     .build();
@@ -300,18 +303,34 @@ public class FleetAllocationService implements IFleetAllocationService {
                     .explanation(candidate.getReason())
                     .trigger(trigger)
                     .build();
-            EventEnvelope<AgentScoreReadyEvent> event = EventEnvelope.<AgentScoreReadyEvent>builder()
-                    .eventId(UUID.randomUUID())
-                    .eventType("agent.score.ready")
-                    .occurredAt(Instant.now())
-                    .correlationId(UUID.nameUUIDFromBytes(
-                            String.valueOf(decision.getLoadId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-                    .version(1)
-                    .producer("ai-powered-fleet-allocation")
-                    .payload(payload)
-                    .build();
-            kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(), event);
+            kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(),
+                    envelope("agent.score.ready", decision.getLoadId(), payload));
             log.info("Puntaje de reasignación listo para carga #{} y conductor {}",
                     decision.getLoadId(), candidate.getDriverId());
+    }
+
+    private void publishNoCandidatesEvent(AllocationDecision decision, Set<String> excludedDriverIds, String trigger) {
+        Map<String, Object> payload = Map.of(
+                "loadId", decision.getLoadId(),
+                "decisionId", decision.getId(),
+                "excludedDriverIds", List.copyOf(excludedDriverIds),
+                "trigger", trigger == null ? "" : trigger
+        );
+        kafkaTemplate.send(allocationTopic, decision.getLoadId().toString(),
+                envelope("agent.no.candidates", decision.getLoadId(), payload));
+        log.info("Sin candidatos para la carga #{} tras excluir {}", decision.getLoadId(), excludedDriverIds);
+    }
+
+    private <T> EventEnvelope<T> envelope(String eventType, Long loadId, T payload) {
+        return EventEnvelope.<T>builder()
+                .eventId(UUID.randomUUID())
+                .eventType(eventType)
+                .occurredAt(Instant.now())
+                .correlationId(UUID.nameUUIDFromBytes(
+                        String.valueOf(loadId).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .version(1)
+                .producer("ai-powered-fleet-allocation")
+                .payload(payload)
+                .build();
     }
 }

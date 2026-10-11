@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.mockito.Mockito.verify;
@@ -31,12 +33,13 @@ class FreightLoadEventListenerTest {
                 .payload(FreightLoadEventPayload.builder()
                         .loadId(42L)
                         .assignedDriverId("driver-rejected")
+                        .excludedDriverIds(List.of("driver-earlier", "driver-rejected"))
                         .build())
                 .build();
 
         listener.handleLoadPublished(mapper.writeValueAsString(event));
 
         verify(service).processAutomaticReallocationForLoad(
-                42L, "driver-rejected", "assignment.rejected");
+                42L, Set.of("driver-earlier", "driver-rejected"), "assignment.rejected");
     }
 }
