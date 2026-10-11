@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Data
 @Builder
@@ -22,4 +23,7 @@ public class FreightLoadDto {
     private String destinationCity;
     private BigDecimal offeredBudget;
     private String status;
+    private String assignmentStatus;
+    /** Conductores que ya rechazaron o dejaron vencer esta carga (no se les vuelve a proponer). */
+    private List<String> discardedDriverIds;
 }

@@ -5,6 +5,7 @@ import escuelaing.edu.co.truckdar.fleet_allocation.dto.response.AllocationResult
 import escuelaing.edu.co.truckdar.fleet_allocation.service.IFleetAllocationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -25,7 +26,14 @@ public class FleetAllocationController {
 
     @PostMapping("/match/{loadId}")
     public ResponseEntity<AllocationResultResponse> matchLoadById(@PathVariable Long loadId) {
-        return ResponseEntity.ok(service.processAutomaticAllocationForLoad(loadId));
+        AllocationResultResponse result = service.processAutomaticAllocationForLoad(loadId);
+        // La decisión se devuelve siempre; el código HTTP refleja si Load-Allocation la aplicó.
+        HttpStatus status = switch (result.getStatus()) {
+            case ASSIGNMENT_CONFLICT -> HttpStatus.CONFLICT;
+            case ASSIGNMENT_FAILED -> HttpStatus.BAD_GATEWAY;
+            default -> HttpStatus.OK;
+        };
+        return ResponseEntity.status(status).body(result);
     }
 
     @GetMapping("/history/{loadId}")

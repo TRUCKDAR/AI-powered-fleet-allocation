@@ -20,6 +20,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 
 import java.time.LocalDateTime;
@@ -102,18 +103,47 @@ public class FleetAllocationService implements IFleetAllocationService {
                     "La flota no está disponible; la recomendación queda pendiente sin datos sintéticos");
         }
 
+        // Una carga reabierta (UNASSIGNED_NO_DRIVERS) no se vuelve a proponer a quien ya la rechazó o dejó vencer.
+        Set<String> discarded = load.get().getDiscardedDriverIds() == null
+                ? Set.of() : Set.copyOf(load.get().getDiscardedDriverIds());
+        List<AvailableTruckDto> candidates = availableTrucks.get().stream()
+                .filter(truck -> !discarded.contains(truck.getDriverId()))
+                .collect(Collectors.toList());
+
         ManualAllocationRequest request = ManualAllocationRequest.builder()
                 .load(load.get())
-                .candidateTrucks(availableTrucks.get())
+                .candidateTrucks(candidates)
                 .build();
 
         AllocationResultResponse result = processManualOptimization(request);
-
-        if (result.getStatus() == AllocationStatus.SUCCESSFUL) {
-            confirmAssignmentInLoadService(loadId, result.getSelectedDriverId(), result.getSelectedDriverName(),
-                    result.getSelectedVehiclePlate(), correlationId);
+        if (result.getStatus() != AllocationStatus.SUCCESSFUL) {
+            return result;
         }
 
+        AssignmentConfirmation confirmation = confirmAssignmentInLoadService(loadId, result.getSelectedDriverId(),
+                result.getSelectedDriverName(), result.getSelectedVehiclePlate(), correlationId);
+        if (confirmation.accepted()) {
+            return result;
+        }
+        return markDecisionNotApplied(result, confirmation);
+    }
+
+    /**
+     * La recomendación existe pero Load-Allocation no la aplicó: se corrige la decisión persistida y la respuesta
+     * deja de reportar SUCCESSFUL.
+     */
+    private AllocationResultResponse markDecisionNotApplied(AllocationResultResponse result,
+                                                            AssignmentConfirmation confirmation) {
+        String reason = (confirmation.conflict()
+                ? "Load-Allocation rechazó la asignación (409): "
+                : "Load-Allocation no confirmó la asignación: ") + confirmation.detail();
+        repository.findById(result.getDecisionId()).ifPresent(decision -> {
+            decision.setStatus(confirmation.conflict() ? AllocationStatus.REJECTED : AllocationStatus.RECOMMENDATION_PENDING);
+            decision.setReasonDetails(reason.length() > 250 ? reason.substring(0, 250) : reason);
+            repository.save(decision);
+        });
+        result.setStatus(confirmation.conflict() ? AllocationStatus.ASSIGNMENT_CONFLICT : AllocationStatus.ASSIGNMENT_FAILED);
+        result.setReasonDetails(reason);
         return result;
     }
 
@@ -232,8 +262,15 @@ public class FleetAllocationService implements IFleetAllocationService {
                 .build();
     }
 
-    private void confirmAssignmentInLoadService(Long loadId, String driverId, String driverName, String plate,
-                                                UUID correlationId) {
+    /** Resultado de pedir a Load-Allocation que aplique la propuesta (PATCH /assign). */
+    record AssignmentConfirmation(boolean accepted, boolean conflict, String detail) {
+        static AssignmentConfirmation ok() { return new AssignmentConfirmation(true, false, null); }
+        static AssignmentConfirmation conflict(String detail) { return new AssignmentConfirmation(false, true, detail); }
+        static AssignmentConfirmation failed(String detail) { return new AssignmentConfirmation(false, false, detail); }
+    }
+
+    private AssignmentConfirmation confirmAssignmentInLoadService(Long loadId, String driverId, String driverName,
+                                                                  String plate, UUID correlationId) {
         try {
             restClient.patch()
                     .uri(loadAllocationServiceUrl + "/api/v1/loads/" + loadId + "/assign")
@@ -250,9 +287,22 @@ public class FleetAllocationService implements IFleetAllocationService {
                     .retrieve()
                     .toBodilessEntity();
             log.info("Asignación confirmada en Load-Allocation para carga #{}", loadId);
+            return AssignmentConfirmation.ok();
+        } catch (HttpClientErrorException.Conflict e) {
+            String detail = loadServiceMessage(e);
+            log.warn("Load-Allocation rechazó la asignación de la carga #{}: {}", loadId, detail);
+            return AssignmentConfirmation.conflict(detail);
         } catch (Exception e) {
-            log.warn("Fallo confirmando asignación en Load-Allocation: {}", e.getMessage());
+            log.error("No se pudo confirmar la asignación de la carga #{} en Load-Allocation", loadId, e);
+            return AssignmentConfirmation.failed(e.getMessage());
         }
+    }
+
+    /** Extrae el campo "message" del error JSON de Load-Allocation; si no existe, devuelve el cuerpo crudo. */
+    private String loadServiceMessage(HttpClientErrorException e) {
+        String body = e.getResponseBodyAsString();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\"message\"\\s*:\\s*\"([^\"]*)\"").matcher(body);
+        return matcher.find() ? matcher.group(1) : body;
     }
 
     private AllocationDecision buildDecisionEntity(Long loadId, AllocationCandidateResponse bestCandidate, int candidatesCount) {
