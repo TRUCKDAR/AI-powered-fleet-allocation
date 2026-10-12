@@ -1,6 +1,7 @@
 package escuelaing.edu.co.truckdar.fleet_allocation.service;
 
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.AvailableTruckDto;
+import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.DriverCommitmentDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FleetDriverStateDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.client.FreightLoadDto;
 import escuelaing.edu.co.truckdar.fleet_allocation.dto.event.FleetAllocationCompletedEvent;
@@ -25,9 +26,12 @@ import org.springframework.web.client.RestClient;
 
 import java.time.LocalDateTime;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -42,6 +46,12 @@ public class FleetAllocationService implements IFleetAllocationService {
     private final FleetScoringOptimizer optimizer;
     private final RestClient restClient;
     private final KafkaTemplate<String, Object> kafkaTemplate;
+
+    /** Estados de asignación de una carga AVAILABLE que espera conductor (además de null: nunca propuesta). */
+    private static final Set<String> WAITING_ASSIGNMENT_STATUSES = Set.of("UNASSIGNED_NO_DRIVERS");
+
+    @Value("${truckdar.allocation.retry-batch-size:20}")
+    private int retryBatchSize = 20;
 
     @Value("${truckdar.services.load-allocation-url:http://localhost:8083}")
     private String loadAllocationServiceUrl;
@@ -97,7 +107,7 @@ public class FleetAllocationService implements IFleetAllocationService {
                     "La carga no está disponible; la recomendación queda pendiente sin datos sintéticos");
         }
 
-        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService();
+        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService(loadId);
         if (availableTrucks.isEmpty()) {
             return pendingRecommendation(loadId,
                     "La flota no está disponible; la recomendación queda pendiente sin datos sintéticos");
@@ -158,7 +168,7 @@ public class FleetAllocationService implements IFleetAllocationService {
                     "La carga no está disponible; la reasignación queda pendiente sin datos sintéticos");
         }
 
-        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService();
+        Optional<List<AvailableTruckDto>> availableTrucks = fetchAvailableTrucksFromService(loadId);
         if (availableTrucks.isEmpty()) {
             return pendingRecommendation(loadId,
                     "La flota no está disponible; la reasignación queda pendiente sin datos sintéticos");
@@ -203,6 +213,65 @@ public class FleetAllocationService implements IFleetAllocationService {
                 .build();
     }
 
+    /**
+     * Un conductor se liberó (entrega o cancelación): se reintenta el matching de las cargas en espera, de la más
+     * antigua a la más reciente. Solo se lanza el matching real (que persiste la decisión) si hay algún candidato
+     * elegible, y se detiene cuando ya no queda ningún conductor libre.
+     */
+    @Override
+    public List<AllocationResultResponse> retryWaitingLoads(String trigger) {
+        List<FreightLoadDto> waiting = fetchWaitingLoads();
+        List<AllocationResultResponse> results = new ArrayList<>();
+        for (FreightLoadDto load : waiting) {
+            Optional<List<AvailableTruckDto>> fleet = fetchAvailableTrucksFromService(load.getId());
+            if (fleet.isEmpty() || fleet.get().stream().allMatch(truck -> truck.getBusyReason() != null)) {
+                log.info("Reintento por {}: no quedan conductores libres; {} carga(s) siguen en espera",
+                        trigger, waiting.size() - results.size());
+                break;
+            }
+            if (!hasEligibleCandidate(load, fleet.get())) {
+                continue;
+            }
+            AllocationResultResponse result = processAutomaticAllocationForLoad(load.getId(), null);
+            log.info("Reintento por {}: carga #{} -> {} ({})", trigger, load.getId(), result.getStatus(),
+                    result.getSelectedDriverId());
+            results.add(result);
+        }
+        return results;
+    }
+
+    /** Cargas AVAILABLE sin propuesta (nunca encontraron conductor) o que quedaron sin candidatos, en orden FIFO. */
+    private List<FreightLoadDto> fetchWaitingLoads() {
+        try {
+            FreightLoadDto[] loads = restClient.get()
+                    .uri(loadAllocationServiceUrl + "/api/v1/loads/available")
+                    .retrieve()
+                    .body(FreightLoadDto[].class);
+            if (loads == null) {
+                return List.of();
+            }
+            return java.util.Arrays.stream(loads)
+                    .filter(load -> load.getAssignmentStatus() == null
+                            || WAITING_ASSIGNMENT_STATUSES.contains(load.getAssignmentStatus()))
+                    .sorted(Comparator.comparing(FreightLoadDto::getId))
+                    .limit(retryBatchSize)
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            log.warn("No se pudieron consultar las cargas en espera en {}: {}", loadAllocationServiceUrl, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** Evalúa en memoria (sin persistir) si algún camión libre y no descartado sirve para la carga. */
+    private boolean hasEligibleCandidate(FreightLoadDto load, List<AvailableTruckDto> fleet) {
+        Set<String> discarded = load.getDiscardedDriverIds() == null
+                ? Set.of() : Set.copyOf(load.getDiscardedDriverIds());
+        return fleet.stream()
+                .filter(truck -> !discarded.contains(truck.getDriverId()))
+                .map(truck -> optimizer.evaluateTruck(truck, load))
+                .anyMatch(AllocationCandidateResponse::getEligible);
+    }
+
     @Override
     @Transactional(readOnly = true)
     public List<AllocationResultResponse> getDecisionsByLoad(Long loadId) {
@@ -236,19 +305,60 @@ public class FleetAllocationService implements IFleetAllocationService {
         }
     }
 
-    private Optional<List<AvailableTruckDto>> fetchAvailableTrucksFromService() {
+    /**
+     * Flota ACTIVO con los conductores ocupados marcados como no elegibles: se toma lo que reporta fleets-drivers
+     * (cargas aceptadas o en ruta) y se completa con Load-Allocation, que es la fuente de verdad y además conoce
+     * las propuestas vigentes.
+     */
+    private Optional<List<AvailableTruckDto>> fetchAvailableTrucksFromService(Long loadId) {
+        List<AvailableTruckDto> trucks;
         try {
             List<FleetDriverStateDto> states = restClient.get()
                     .uri(fleetsDriversServiceUrl + "/api/v1/fleets-drivers/active")
                     .retrieve()
                     .body(new ParameterizedTypeReference<List<FleetDriverStateDto>>() {});
-            return Optional.ofNullable(states).map(list -> list.stream()
+            if (states == null) {
+                return Optional.empty();
+            }
+            trucks = states.stream()
                     .filter(FleetDriverStateDto::isAvailableForAllocation)
                     .map(FleetDriverStateDto::toAvailableTruck)
-                    .collect(Collectors.toList()));
+                    .collect(Collectors.toList());
         } catch (Exception e) {
             log.error("No se pudo obtener flota desde {}; no se usarán datos sintéticos",
                     fleetsDriversServiceUrl, e);
+            return Optional.empty();
+        }
+        // Load-Allocation manda cuando responde: fleets-drivers puede ir un evento atrás (p. ej. aún no procesó
+        // el trip.delivered que acaba de liberar al conductor). Su onTrip solo se usa si Load-Allocation no responde.
+        fetchDriverCommitments(loadId).ifPresent(busy ->
+                trucks.forEach(truck -> truck.setBusyReason(busy.get(truck.getDriverId()))));
+        return Optional.of(trucks);
+    }
+
+    /**
+     * Conductores comprometidos según Load-Allocation, sin contar la carga que se está asignando. Si no responde,
+     * se sigue solo con fleets-drivers: Load-Allocation rechaza igualmente (409) asignar a un conductor ocupado.
+     */
+    private Optional<Map<String, String>> fetchDriverCommitments(Long loadId) {
+        try {
+            DriverCommitmentDto[] commitments = restClient.get()
+                    .uri(loadAllocationServiceUrl + "/api/v1/loads/driver-commitments")
+                    .retrieve()
+                    .body(DriverCommitmentDto[].class);
+            if (commitments == null) {
+                return Optional.empty();
+            }
+            Map<String, String> busy = new HashMap<>();
+            for (DriverCommitmentDto commitment : commitments) {
+                if (commitment.getDriverId() != null && !Objects.equals(commitment.getLoadId(), loadId)) {
+                    busy.putIfAbsent(commitment.getDriverId(), commitment.busyReason());
+                }
+            }
+            return Optional.of(busy);
+        } catch (Exception e) {
+            log.warn("No se pudieron consultar los conductores ocupados en {}; se usa solo fleets-drivers: {}",
+                    loadAllocationServiceUrl, e.getMessage());
             return Optional.empty();
         }
     }

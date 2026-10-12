@@ -42,4 +42,41 @@ class FreightLoadEventListenerTest {
         verify(service).processAutomaticReallocationForLoad(
                 42L, Set.of("driver-earlier", "driver-rejected"), "assignment.rejected", correlationId);
     }
+
+    private static String event(ObjectMapper mapper, String type, String assignedDriverId) throws Exception {
+        return mapper.writeValueAsString(EventEnvelope.<FreightLoadEventPayload>builder()
+                .eventId(UUID.randomUUID())
+                .eventType(type)
+                .occurredAt(Instant.parse("2026-10-11T23:00:00Z"))
+                .correlationId(UUID.randomUUID())
+                .version(1)
+                .producer("load-allocation")
+                .payload(FreightLoadEventPayload.builder().loadId(7L).assignedDriverId(assignedDriverId).build())
+                .build());
+    }
+
+    @Test
+    void deliveryOrCancellationOfAnAssignedLoadRetriesWaitingLoads() throws Exception {
+        IFleetAllocationService service = Mockito.mock(IFleetAllocationService.class);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        FreightLoadEventListener listener = new FreightLoadEventListener(service, mapper);
+
+        listener.handleLoadPublished(event(mapper, "trip.delivered", "driver-ana"));
+        listener.handleLoadPublished(event(mapper, "load.cancelled", "driver-ana"));
+
+        verify(service).retryWaitingLoads("trip.delivered");
+        verify(service).retryWaitingLoads("load.cancelled");
+    }
+
+    @Test
+    void cancellingALoadWithoutDriverDoesNotRetry() throws Exception {
+        IFleetAllocationService service = Mockito.mock(IFleetAllocationService.class);
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        FreightLoadEventListener listener = new FreightLoadEventListener(service, mapper);
+
+        listener.handleLoadPublished(event(mapper, "load.cancelled", null));
+        listener.handleLoadPublished(event(mapper, "trip.started", "driver-ana"));
+
+        verify(service, Mockito.never()).retryWaitingLoads(Mockito.anyString());
+    }
 }

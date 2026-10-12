@@ -18,6 +18,18 @@ public class FleetScoringOptimizer {
     private static final double MAX_PROXIMITY_RADIUS_KM = 300.0;
 
     public AllocationCandidateResponse evaluateTruck(AvailableTruckDto truck, FreightLoadDto load) {
+        if (truck.getBusyReason() != null) {
+            return AllocationCandidateResponse.builder()
+                    .vehiclePlate(truck.getPlate())
+                    .driverId(truck.getDriverId())
+                    .driverName(truck.getDriverName())
+                    .truckType(truck.getTruckType())
+                    .eligible(false)
+                    .score(0.0)
+                    .reason(truck.getBusyReason())
+                    .build();
+        }
+
         if (truck.getCapacityTons() == null || truck.getCapacityTons() < load.getWeightTons()) {
             return AllocationCandidateResponse.builder()
                     .vehiclePlate(truck.getPlate())

@@ -19,4 +19,6 @@ public class AvailableTruckDto {
     private Double currentLongitude;
     private Double rating;
     private Boolean isAvailable;
+    /** Si no es null, el conductor ya tiene una carga activa o una propuesta vigente y no es elegible. */
+    private String busyReason;
 }

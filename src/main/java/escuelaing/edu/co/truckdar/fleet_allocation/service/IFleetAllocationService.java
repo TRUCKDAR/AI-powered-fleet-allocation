@@ -18,4 +18,7 @@ public interface IFleetAllocationService {
         return processAutomaticAllocationForLoad(loadId, null);
     }
     List<AllocationResultResponse> getDecisionsByLoad(Long loadId);
+
+    /** Reintenta el matching de las cargas en espera cuando un conductor se libera (trip.delivered, load.cancelled). */
+    List<AllocationResultResponse> retryWaitingLoads(String trigger);
 }

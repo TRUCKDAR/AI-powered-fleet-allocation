@@ -27,6 +27,9 @@ public class FleetDriverStateDto {
     private Double currentLatitude;
     private Double currentLongitude;
     private String status;
+    private boolean onTrip;
+    private Long currentLoadId;
+    private String currentLoadStatus;
 
     public boolean isAvailableForAllocation() {
         return "ACTIVO".equalsIgnoreCase(status) && !restRequiredAlert;
@@ -43,6 +46,7 @@ public class FleetDriverStateDto {
                 .currentLatitude(currentLatitude)
                 .currentLongitude(currentLongitude)
                 .isAvailable(isAvailableForAllocation())
+                .busyReason(onTrip ? "Conductor ocupado con la carga #" + currentLoadId + " (" + currentLoadStatus + ")" : null)
                 .build();
     }
 }

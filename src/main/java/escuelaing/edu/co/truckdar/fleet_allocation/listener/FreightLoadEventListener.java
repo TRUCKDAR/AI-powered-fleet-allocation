@@ -17,6 +17,9 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class FreightLoadEventListener {
 
+    /** Eventos de Load-Allocation que dejan libre al conductor asignado. */
+    private static final Set<String> DRIVER_RELEASE_EVENTS = Set.of("trip.delivered", "load.cancelled");
+
     private final IFleetAllocationService allocationService;
     private final ObjectMapper objectMapper;
 
@@ -55,6 +58,13 @@ public class FreightLoadEventListener {
                 allocationService.processAutomaticReallocationForLoad(
                         event.getPayload().getLoadId(), excludedDriverIds, event.getEventType(),
                         event.getCorrelationId());
+            } else if (DRIVER_RELEASE_EVENTS.contains(event.getEventType())
+                    && event.getPayload() != null
+                    && event.getPayload().getAssignedDriverId() != null) {
+                // El conductor quedó libre: las cargas que esperaban conductor se vuelven a evaluar.
+                log.info("Conductor {} liberado por {} de la carga #{}; se reintentan las cargas en espera",
+                        event.getPayload().getAssignedDriverId(), event.getEventType(), event.getPayload().getLoadId());
+                allocationService.retryWaitingLoads(event.getEventType());
             }
         } catch (Exception e) {
             log.error("No se pudo procesar evento de carga con sobre común", e);
