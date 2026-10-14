@@ -6,9 +6,9 @@ spring:
     name: ms-ai-fleet-allocation
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/truckdar_db
-    username: truckdar_admin
-    password: truckdar_password
+    url: jdbc:postgresql://localhost:5432/truckcar_db
+    username: truckcar_admin
+    password: truckcar_password
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -27,11 +27,11 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
-truckdar:
+truckcar:
   kafka:
     topic:
-      load-events: truckdar.events.load-allocation
-      vehicle-status: truckdar.events.vehicle-status
+      load-events: truckcar.events.load-allocation
+      vehicle-status: truckcar.events.vehicle-status
 
 services:
   load-allocation:
